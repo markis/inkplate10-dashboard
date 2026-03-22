@@ -1,0 +1,15 @@
+# PlatformIO
+.pio/
+.vscode/
+.clang_complete
+.gcc-flags.json
+
+# Private configuration
+src/config.h
+
+# Build artifacts
+*.bin
+*.elf
+
+# macOS
+.DS_Store

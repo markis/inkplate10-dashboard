@@ -1,0 +1,19 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// WiFi credentials
+const char* WIFI_SSID = "your-wifi-ssid";
+const char* WIFI_PASSWORD = "your-wifi-password";
+
+// MQTT configuration
+const char* MQTT_SERVER = "10.0.0.1";
+const int MQTT_PORT = 1883;
+const char* MQTT_CLIENT_ID = "Inkplate";
+const char* MQTT_USER = "your-mqtt-username";
+const char* MQTT_PASSWORD = "your-mqtt-password";
+const char* MQTT_TOPIC = "home/inkplate";
+
+// Image URL
+const char* IMAGE_URL = "https://example.com/your-image.jpg";
+
+#endif // CONFIG_H
