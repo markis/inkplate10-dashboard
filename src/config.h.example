@@ -16,4 +16,8 @@ const char* MQTT_TOPIC = "home/inkplate";
 // Image URL
 const char* IMAGE_URL = "https://example.com/your-image.jpg";
 
+// NTP Configuration
+const char* NTP_SERVER = "pool.ntp.org";
+// Timezone is configured in main.cpp (defaults to US Eastern Time with automatic DST)
+
 #endif // CONFIG_H
