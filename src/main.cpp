@@ -3,6 +3,9 @@
 #error "Wrong board selection for this example, please select Inkplate 10 in the boards menu."
 #endif
 
+// Debug mode - comment out for production to disable Serial logging and save power
+#define INKPLATE_DEBUG
+
 #include <Arduino.h>
 #include <HTTPClient.h>
 #include <Inkplate.h>
@@ -13,6 +16,17 @@
 #include <Timezone.h>
 #include <time.h>
 #include "config.h"  // Private configuration file
+
+// Debug logging helper - noop in production
+#ifdef INKPLATE_DEBUG
+    #define DEBUG_PRINT(x) Serial.print(x)
+    #define DEBUG_PRINTLN(x) Serial.println(x)
+    #define DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)
+#else
+    #define DEBUG_PRINT(x)
+    #define DEBUG_PRINTLN(x)
+    #define DEBUG_PRINTF(...)
+#endif
 
 Inkplate display(INKPLATE_3BIT);
 ESP32Time rtc(0);  // Internal RTC, offset in seconds (0 = UTC, we'll set timezone properly)
@@ -42,57 +56,55 @@ bool isTimeValid();
 bool isNighttime();
 unsigned long calculateSleepDuration();
 bool displayImage();
-void reconnectMqtt();
 void sendMqttMsg();
 void goToSleep(unsigned long sleepDuration);
 
 void setup() {
+    #ifdef INKPLATE_DEBUG
     Serial.begin(115200);
+    #endif
 
     // Initialize display - this is CRITICAL
-    Serial.println("Initializing display...");
+    DEBUG_PRINTLN("Initializing display...");
     display.begin();
-    
-    // Clear the display buffer and push to screen (required for proper initialization)
-    display.clearDisplay();
-    display.display();
 
-    Serial.println("Display initialized successfully");
+    DEBUG_PRINTLN("Display initialized successfully");
 
     // Try to connect to WiFi
     if (!connectWifi()) {
-        Serial.println("WiFi failed - keeping stale image, sleeping for shorter duration");
+        DEBUG_PRINTLN("WiFi failed - keeping stale image, sleeping for shorter duration");
         goToSleep(DEEP_SLEEP_ON_ERROR);
         return; // Never reached, but good practice
     }
 
     // Check if time is valid, if not sync with NTP
     if (!isTimeValid()) {
-        Serial.println("Time is not valid, syncing with NTP...");
+        DEBUG_PRINTLN("Time is not valid, syncing with NTP...");
         if (!syncTimeFromNTP()) {
-            Serial.println("Failed to sync time from NTP");
+            DEBUG_PRINTLN("Failed to sync time from NTP");
             // Continue anyway, we'll try again next cycle
         }
     }
 
     // Display current time
-    Serial.printf("Current time: %s\n", rtc.getTime("%Y-%m-%d %H:%M:%S").c_str());
+    DEBUG_PRINTF("Current time: %s\n", rtc.getTime("%Y-%m-%d %H:%M:%S").c_str());
 
     // Check if it's nighttime (midnight to 6am)
     if (isNighttime()) {
-        Serial.println("It's nighttime (00:00-06:00), sleeping for 6 hours");
+        DEBUG_PRINTLN("It's nighttime (00:00-06:00), sleeping for 6 hours");
         goToSleep(NIGHTTIME_SLEEP_DURATION);
         return;
     }
 
     // Try to display image
-    if (!displayImage()) {
-        Serial.println("Image download failed - keeping stale image, sleeping for shorter duration");
+    bool imageSuccess = displayImage();
+    if (!imageSuccess) {
+        DEBUG_PRINTLN("Image download failed - keeping stale image, sleeping for shorter duration");
         goToSleep(DEEP_SLEEP_ON_ERROR);
         return; // Never reached, but good practice
     }
 
-    // Send MQTT telemetry (non-critical, just log if it fails)
+    // Send MQTT telemetry only if image was successful
     sendMqttMsg();
 
     // Calculate sleep duration based on time
@@ -105,22 +117,34 @@ void loop() {
 }
 
 bool connectWifi() {
-    Serial.print("Connecting to WiFi...");
+    DEBUG_PRINT("Connecting to WiFi...");
 
-    // Use Inkplate's built-in WiFi connection with timeout
-    if (!display.connectWiFi(WIFI_SSID, WIFI_PASSWORD, WIFI_TIMEOUT_MS)) {
-        Serial.println("\nFailed to connect to WiFi");
+    // Use native WiFi for better power control
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    
+    // Wait for connection with timeout
+    unsigned long startAttemptTime = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < WIFI_TIMEOUT_MS) {
+        delay(100);
+    }
+    
+    if (WiFi.status() != WL_CONNECTED) {
+        DEBUG_PRINTLN("\nFailed to connect to WiFi");
         return false;
     }
 
-    Serial.println("\nConnected to WiFi");
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
+    // Reduce WiFi TX power for battery savings (device is close to AP)
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);  // Options: 19.5, 19, 18.5, 17, 15, 13, 11, 8.5, 7, 5, 2, -1 dBm
+
+    DEBUG_PRINTLN("\nConnected to WiFi");
+    DEBUG_PRINT("IP address: ");
+    DEBUG_PRINTLN(WiFi.localIP());
     return true;
 }
 
 bool syncTimeFromNTP() {
-    Serial.println("Syncing time from NTP server...");
+    DEBUG_PRINTLN("Syncing time from NTP server...");
     
     // Configure time with NTP (use UTC, we'll convert with Timezone library)
     configTime(0, 0, NTP_SERVER);  // 0 offset = UTC
@@ -129,33 +153,29 @@ bool syncTimeFromNTP() {
     struct tm timeinfo;
     int attempts = 0;
     while (!getLocalTime(&timeinfo) && attempts < 10) {
-        Serial.print(".");
+        DEBUG_PRINT(".");
         delay(500);
         attempts++;
     }
     
     if (attempts >= 10) {
-        Serial.println("\nFailed to obtain time from NTP");
+        DEBUG_PRINTLN("\nFailed to obtain time from NTP");
         return false;
     }
     
-    Serial.println("\nTime synchronized successfully");
-    
+    DEBUG_PRINTLN("\nTime synchronized successfully");
+
     // Get UTC time as epoch
     time_t utcTime = mktime(&timeinfo);
-    
+
     // Convert to local time using Timezone library (handles DST automatically)
     time_t localTime = usEastern.toLocal(utcTime);
     struct tm* localTimeInfo = localtime(&localTime);
-    
+
     // Set ESP32Time RTC with the local time
     rtc.setTime(localTimeInfo->tm_sec, localTimeInfo->tm_min, localTimeInfo->tm_hour,
                 localTimeInfo->tm_mday, localTimeInfo->tm_mon + 1, localTimeInfo->tm_year + 1900);
-    
-    // Check if we're in DST or standard time
-    const char* tzName = usEastern.utcIsDST(utcTime) ? "EDT" : "EST";
-    Serial.printf("Set RTC to: %s %s\n", rtc.getTime("%Y-%m-%d %H:%M:%S").c_str(), tzName);
-    
+
     return true;
 }
 
@@ -164,7 +184,7 @@ bool isTimeValid() {
     unsigned long currentEpoch = rtc.getEpoch();
     bool valid = currentEpoch >= TIME_VALIDITY_EPOCH;
     
-    Serial.printf("Current epoch: %lu, Valid threshold: %lu, Is valid: %s\n",
+    DEBUG_PRINTF("Current epoch: %lu, Valid threshold: %lu, Is valid: %s\n",
                   currentEpoch, TIME_VALIDITY_EPOCH, valid ? "YES" : "NO");
     
     return valid;
@@ -173,7 +193,7 @@ bool isTimeValid() {
 bool isNighttime() {
     int currentHour = rtc.getHour(true);  // true = 24-hour format
     
-    Serial.printf("Current hour: %d, Nighttime hours: %d-%d\n",
+    DEBUG_PRINTF("Current hour: %d, Nighttime hours: %d-%d\n",
                   currentHour, NIGHTTIME_START_HOUR, NIGHTTIME_END_HOUR);
     
     // Check if current hour is between midnight (0) and 6am
@@ -190,17 +210,17 @@ unsigned long calculateSleepDuration() {
     // If we're close to midnight (within normal sleep duration), sleep until just past midnight
     if (minutesUntilMidnight <= (DEEP_SLEEP_DURATION / 60)) {
         unsigned long sleepSeconds = (minutesUntilMidnight * 60) + 300; // Add 5 minutes buffer
-        Serial.printf("Close to midnight, sleeping for %lu seconds to enter nighttime mode\n", sleepSeconds);
+        DEBUG_PRINTF("Close to midnight, sleeping for %lu seconds to enter nighttime mode\n", sleepSeconds);
         return sleepSeconds;
     }
     
     // Otherwise, normal sleep duration
-    Serial.printf("Using normal sleep duration: %lu seconds\n", DEEP_SLEEP_DURATION);
+    DEBUG_PRINTF("Using normal sleep duration: %lu seconds\n", DEEP_SLEEP_DURATION);
     return DEEP_SLEEP_DURATION;
 }
 
 bool displayImage() {
-    Serial.println("Downloading and displaying image...");
+    DEBUG_PRINTLN("Downloading and displaying image...");
 
     // Disable WiFi sleep for stable connection during download
     WiFi.setSleep(false);
@@ -209,79 +229,62 @@ bool displayImage() {
 
     // Try multiple times to download the image
     for (int attempt = 1; attempt <= IMAGE_RETRY_ATTEMPTS; attempt++) {
-        Serial.printf("Image download attempt %d/%d...\n", attempt, IMAGE_RETRY_ATTEMPTS);
+        DEBUG_PRINTF("Image download attempt %d/%d...\n", attempt, IMAGE_RETRY_ATTEMPTS);
 
         // Clear display buffer
         display.clearDisplay();
 
         // drawImage(url, x, y, dither, invert)
-        // Set invert=true to fix black/white inversion
         success = display.drawImage(IMAGE_URL, 0, 0, false, false);
 
         if (success) {
             display.display();
             WiFi.setSleep(true);
-            Serial.println("Image displayed successfully");
+            DEBUG_PRINTLN("Image displayed successfully");
             return true;
         }
 
-        Serial.printf("Attempt %d failed\n", attempt);
+        DEBUG_PRINTF("Attempt %d failed\n", attempt);
 
-        // Wait before retry (except on last attempt)
+        // Wait before retry (except on last attempt) - reduced from 2s to 500ms for power savings
         if (attempt < IMAGE_RETRY_ATTEMPTS) {
-            delay(2000);
+            delay(500);
         }
     }
 
     // All attempts failed
     WiFi.setSleep(true);
-    Serial.println("Failed to download image after all attempts");
+    DEBUG_PRINTLN("Failed to download image after all attempts");
     return false;
-}
-
-void reconnectMqtt() {
-    int attempts = 0;
-    while (!mqttClient.connected() && attempts < 3) {
-        Serial.print("Attempting MQTT connection...");
-        if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD)) {
-            Serial.println("connected");
-            return;
-        } else {
-            Serial.print("failed, rc=");
-            Serial.print(mqttClient.state());
-            Serial.println(" retrying in 5 seconds");
-            delay(5000);
-            attempts++;
-        }
-    }
-
-    if (!mqttClient.connected()) {
-        Serial.println("Failed to connect to MQTT after 3 attempts");
-    }
 }
 
 void sendMqttMsg() {
     mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
 
-    if (!mqttClient.connected()) {
-        reconnectMqtt();
+    // Single connection attempt - fail fast to save power
+    DEBUG_PRINT("Attempting MQTT connection...");
+    if (!mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD)) {
+        DEBUG_PRINTF("failed, rc=%d\n", mqttClient.state());
+        DEBUG_PRINTLN("Skipping MQTT, will retry in 20 minutes");
+        return;
     }
 
-    if (mqttClient.connected()) {
-        int temperature = display.readTemperature();
-        float voltage = display.readBattery();
+    DEBUG_PRINTLN("connected");
 
-        char message[60];
-        snprintf(message, sizeof(message), "inkplate temperature=%d,voltage=%.2f", temperature, voltage);
+    // Read sensors and publish
+    int temperature = display.readTemperature();
+    float voltage = display.readBattery();
 
-        if (mqttClient.publish(MQTT_TOPIC, message)) {
-            Serial.println("MQTT message sent successfully");
-        } else {
-            Serial.println("Failed to send MQTT message");
-        }
+    char message[60];
+    snprintf(message, sizeof(message), "{\"temperature\":%d,\"voltage\":%.2f}", temperature, voltage);
 
-        mqttClient.disconnect();
+    if (mqttClient.publish(MQTT_TOPIC, message)) {
+        DEBUG_PRINTLN("MQTT message sent successfully");
+    } else {
+        DEBUG_PRINTLN("Failed to send MQTT message");
     }
+
+    mqttClient.disconnect();
 }
 
 void goToSleep(unsigned long sleepDuration) {
@@ -295,9 +298,12 @@ void goToSleep(unsigned long sleepDuration) {
     // Configure wakeup timer
     esp_sleep_enable_timer_wakeup(sleepDuration * 1000000UL);
 
-    Serial.printf("Going to sleep for %lu seconds (%lu minutes)...\n", 
+    DEBUG_PRINTF("Going to sleep for %lu seconds (%lu minutes)...\n", 
                   sleepDuration, sleepDuration / 60);
+    
+    #ifdef INKPLATE_DEBUG
     Serial.flush();
+    #endif
 
     // Enter deep sleep
     esp_deep_sleep_start();

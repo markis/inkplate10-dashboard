@@ -1,0 +1,101 @@
+# Home Assistant MQTT Sensor Configuration for Inkplate Dashboard
+# 
+# Installation:
+# 1. Copy this file to your Home Assistant config directory
+# 2. Add this to your configuration.yaml:
+#    mqtt: !include inkplate-dashboard.yaml
+#    OR add to existing mqtt section:
+#    sensor: !include_dir_merge_list sensors/
+# 3. Restart Home Assistant
+# 4. Check Developer Tools > States for sensor.inkplate_*
+#
+# Message format: {"temperature":23,"voltage":3.85}
+
+mqtt:
+  sensor:
+    # Inkplate Temperature Sensor
+    - name: "Inkplate Temperature"
+      unique_id: "inkplate_dashboard_temperature"
+      state_topic: "home/inkplate"
+      unit_of_measurement: "°C"
+      device_class: "temperature"
+      state_class: "measurement"
+      value_template: "{{ value_json.temperature }}"
+      icon: "mdi:thermometer"
+      
+    # Inkplate Battery Voltage Sensor
+    - name: "Inkplate Battery Voltage"
+      unique_id: "inkplate_dashboard_voltage"
+      state_topic: "home/inkplate"
+      unit_of_measurement: "V"
+      device_class: "voltage"
+      state_class: "measurement"
+      value_template: "{{ value_json.voltage | round(2) }}"
+      icon: "mdi:battery"
+      
+    # Inkplate Battery Percentage (calculated from voltage)
+    # Typical LiPo: 4.2V = 100%, 3.7V = ~50%, 3.0V = 0%
+    # Adjust the formula based on your battery characteristics
+    - name: "Inkplate Battery Level"
+      unique_id: "inkplate_dashboard_battery_level"
+      state_topic: "home/inkplate"
+      unit_of_measurement: "%"
+      device_class: "battery"
+      state_class: "measurement"
+      value_template: >-
+        {% set voltage = value_json.voltage | float %}
+        {% if voltage >= 4.2 %}
+          100
+        {% elif voltage <= 3.0 %}
+          0
+        {% else %}
+          {{ ((voltage - 3.0) / (4.2 - 3.0) * 100) | round(0) }}
+        {% endif %}
+      icon: "mdi:battery-charging"
+
+# Alternative: Group all sensors under a single device
+# Uncomment this section if you prefer device grouping
+# 
+# mqtt:
+#   sensor:
+#     - name: "Inkplate Temperature"
+#       unique_id: "inkplate_dashboard_temperature"
+#       state_topic: "home/inkplate"
+#       unit_of_measurement: "°C"
+#       device_class: "temperature"
+#       state_class: "measurement"
+#       value_template: "{{ value_json.temperature }}"
+#       device:
+#         identifiers: ["inkplate_dashboard"]
+#         name: "Inkplate Dashboard"
+#         manufacturer: "Soldered Electronics"
+#         model: "Inkplate 10"
+#         sw_version: "1.0"
+#       
+#     - name: "Inkplate Battery Voltage"
+#       unique_id: "inkplate_dashboard_voltage"
+#       state_topic: "home/inkplate"
+#       unit_of_measurement: "V"
+#       device_class: "voltage"
+#       state_class: "measurement"
+#       value_template: "{{ value_json.voltage | round(2) }}"
+#       device:
+#         identifiers: ["inkplate_dashboard"]
+#       
+#     - name: "Inkplate Battery Level"
+#       unique_id: "inkplate_dashboard_battery_level"
+#       state_topic: "home/inkplate"
+#       unit_of_measurement: "%"
+#       device_class: "battery"
+#       state_class: "measurement"
+#       value_template: >-
+#         {% set voltage = value_json.voltage | float %}
+#         {% if voltage >= 4.2 %}
+#           100
+#         {% elif voltage <= 3.0 %}
+#           0
+#         {% else %}
+#           {{ ((voltage - 3.0) / (4.2 - 3.0) * 100) | round(0) }}
+#         {% endif %}
+#       device:
+#         identifiers: ["inkplate_dashboard"]
