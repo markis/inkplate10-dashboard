@@ -44,7 +44,8 @@ pio device monitor --baud 115200
 
 - **Image Display**: Downloads JPEG images via HTTPS and displays them on the e-ink screen
 - **Nighttime Sleep**: Automatically sleeps for 6 hours (midnight to 6 AM) to save power
-- **NTP Time Sync**: Synchronizes time from NTP server, persists with CR2032 RTC battery
+- **Smart NTP Sync**: Synchronizes time from NTP server only every 24 hours to conserve battery
+- **Timezone Support**: Full POSIX timezone configuration with automatic DST adjustment
 - **Error Handling**: Preserves last image on WiFi/network failures, retries with shorter sleep intervals
 - **MQTT Telemetry**: Reports temperature and battery voltage
 - **Smart Sleep Scheduling**: Adaptive sleep duration based on time of day
@@ -60,22 +61,23 @@ All private configuration is in `src/config.h`:
 | `WIFI_PASSWORD` | Your WiFi password |
 | `MQTT_SERVER` | MQTT broker IP address |
 | `MQTT_PORT` | MQTT broker port (default: 1883) |
+| `MQTT_CLIENT_ID` | MQTT client identifier (default: Inkplate) |
 | `MQTT_USER` | MQTT username |
 | `MQTT_PASSWORD` | MQTT password |
 | `MQTT_TOPIC` | MQTT topic for telemetry |
 | `IMAGE_URL` | URL of the image to display |
 | `NTP_SERVER` | NTP server address (default: pool.ntp.org) |
-| `GMT_OFFSET_SEC` | Timezone offset in seconds (e.g., -28800 for PST) |
-| `DAYLIGHT_OFFSET_SEC` | Daylight saving offset in seconds (3600 or 0) |
+| `TIMEZONE` | POSIX timezone string (e.g., "EST5EDT,M3.2.0/2,M11.1.0/2" for Eastern Time with DST) |
 
 Public constants in `main.cpp`:
-- `DEEP_SLEEP_DURATION`: 1200s (20 minutes) - normal operation
-- `DEEP_SLEEP_ON_ERROR`: 300s (5 minutes) - on failures
-- `NIGHTTIME_SLEEP_DURATION`: 21600s (6 hours) - midnight to 6 AM
-- `NIGHTTIME_START_HOUR`: 0 (midnight, 24-hour format)
-- `NIGHTTIME_END_HOUR`: 6 (6 AM, 24-hour format)
+- `NORMAL_SLEEP_S`: 1200s (20 minutes) - normal operation
+- `ERROR_SLEEP_S`: 300s (5 minutes) - on failures
+- `NIGHT_SLEEP_S`: 21600s (6 hours) - midnight to 6 AM
+- `NIGHT_START_HOUR`: 0 (midnight, 24-hour format)
+- `NIGHT_END_HOUR`: 6 (6 AM, 24-hour format)
 - `WIFI_TIMEOUT_MS`: 20000ms (20 seconds)
 - `IMAGE_RETRY_ATTEMPTS`: 2
+- `NTP_SYNC_INTERVAL_S`: 86400s (24 hours) - NTP resync interval
 
 ## Hardware
 
@@ -90,10 +92,11 @@ Public constants in `main.cpp`:
 - PubSubClient @ 2.8.0
 - NTPClient @ 3.2.1
 - ESP32Time @ 2.0.6
+- Timezone @ 1.2.4
 
 ## Nighttime Sleep Feature
 
-See [NIGHTTIME_SLEEP.md](NIGHTTIME_SLEEP.md) for detailed information about the nighttime sleep scheduling feature, including:
+See [NIGHTTIME_SLEEP.md](docs/NIGHTTIME_SLEEP.md) for detailed information about the nighttime sleep scheduling feature, including:
 - How time synchronization works
 - Timezone configuration examples
 - Power savings calculations
