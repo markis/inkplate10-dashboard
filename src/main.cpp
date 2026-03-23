@@ -1,311 +1,249 @@
-// Next 3 lines are a precaution, you can ignore those, and the example would also work without them
 #ifndef ARDUINO_INKPLATE10
 #error "Wrong board selection for this example, please select Inkplate 10 in the boards menu."
 #endif
 
-// Debug mode - comment out for production to disable Serial logging and save power
-#define INKPLATE_DEBUG
+// #define INKPLATE_DEBUG
 
 #include <Arduino.h>
-#include <HTTPClient.h>
 #include <Inkplate.h>
 #include <WiFi.h>
 #include <driver/rtc_io.h>
 #include <PubSubClient.h>
-#include <ESP32Time.h>
-#include <Timezone.h>
 #include <time.h>
-#include "config.h"  // Private configuration file
+#include "config.h"
 
-// Debug logging helper - noop in production
 #ifdef INKPLATE_DEBUG
-    #define DEBUG_PRINT(x) Serial.print(x)
-    #define DEBUG_PRINTLN(x) Serial.println(x)
-    #define DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)
+  #define DEBUG_PRINT(x) Serial.print(x)
+  #define DEBUG_PRINTLN(x) Serial.println(x)
+  #define DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)
 #else
-    #define DEBUG_PRINT(x)
-    #define DEBUG_PRINTLN(x)
-    #define DEBUG_PRINTF(...)
+  #define DEBUG_PRINT(x)
+  #define DEBUG_PRINTLN(x)
+  #define DEBUG_PRINTF(...)
 #endif
 
+static constexpr uint32_t WIFI_TIMEOUT_MS = 20000;
+static constexpr uint32_t IMAGE_RETRY_ATTEMPTS = 2;
+static constexpr uint32_t NORMAL_SLEEP_S = 1200;
+static constexpr uint32_t ERROR_SLEEP_S = 300;
+static constexpr uint32_t NIGHT_SLEEP_S = 21600;
+static constexpr int NIGHT_START_HOUR = 0;
+static constexpr int NIGHT_END_HOUR = 6;
+static constexpr uint32_t NTP_SYNC_INTERVAL_S = 86400; // 24 hours
+
+// RTC memory to persist last NTP sync time across deep sleep
+RTC_DATA_ATTR time_t lastNtpSync = 0;
+
 Inkplate display(INKPLATE_3BIT);
-ESP32Time rtc(0);  // Internal RTC, offset in seconds (0 = UTC, we'll set timezone properly)
 
-// US Eastern Time Zone with DST rules
-TimeChangeRule usDST = {"EDT", Second, Sun, Mar, 2, -240};  // UTC-4 (Daylight time begins 2nd Sunday in March at 2am)
-TimeChangeRule usSTD = {"EST", First, Sun, Nov, 2, -300};   // UTC-5 (Standard time begins 1st Sunday in November at 2am)
-Timezone usEastern(usDST, usSTD);
-
-// Public constants
-const unsigned long DEEP_SLEEP_DURATION = 1200UL; // 20 minutes in seconds
-const unsigned long DEEP_SLEEP_ON_ERROR = 300UL; // 5 minutes on error
-const unsigned long NIGHTTIME_SLEEP_DURATION = 21600UL; // 6 hours in seconds
-const int NIGHTTIME_START_HOUR = 0;  // Midnight
-const int NIGHTTIME_END_HOUR = 6;    // 6 AM
-const int WIFI_TIMEOUT_MS = 20000; // 20 second WiFi timeout
-const int IMAGE_RETRY_ATTEMPTS = 2;
-const unsigned long TIME_VALIDITY_EPOCH = 1735689600UL; // Jan 1, 2026 00:00:00 UTC
-
-WiFiClient espClient;
-PubSubClient mqttClient(espClient);
-
-// Forward declarations
-bool connectWifi();
-bool syncTimeFromNTP();
-bool isTimeValid();
-bool isNighttime();
-unsigned long calculateSleepDuration();
-bool displayImage();
-void sendMqttMsg();
-void goToSleep(unsigned long sleepDuration);
+static bool connectWifi();
+static void setTimezone();
+static bool syncTimeFromNtp();
+static bool shouldSyncNtp();
+static bool isNighttime();
+static uint32_t calculateSleepSeconds();
+static bool displayImage();
+static void sendMqttMsg();
+static void goToSleep(uint32_t sleepSeconds);
 
 void setup() {
-    #ifdef INKPLATE_DEBUG
-    Serial.begin(115200);
-    #endif
+#ifdef INKPLATE_DEBUG
+  Serial.begin(115200);
+#endif
 
-    // Initialize display - this is CRITICAL
-    DEBUG_PRINTLN("Initializing display...");
-    display.begin();
+  display.begin();
 
-    DEBUG_PRINTLN("Display initialized successfully");
+  if (!connectWifi()) {
+    goToSleep(ERROR_SLEEP_S);
+  }
 
-    // Try to connect to WiFi
-    if (!connectWifi()) {
-        DEBUG_PRINTLN("WiFi failed - keeping stale image, sleeping for shorter duration");
-        goToSleep(DEEP_SLEEP_ON_ERROR);
-        return; // Never reached, but good practice
+  // Smart NTP sync: only when needed to save battery
+  if (shouldSyncNtp()) {
+    DEBUG_PRINTLN("NTP sync needed");
+    if (syncTimeFromNtp()) {
+      lastNtpSync = time(nullptr);
+      DEBUG_PRINTLN("NTP sync successful");
+    } else {
+      DEBUG_PRINTLN("NTP sync failed, continuing with RTC time");
+      setTimezone(); // Ensure timezone is set even if NTP fails
     }
+    delay(100); // Brief delay to ensure WiFi stack is stable after NTP
+  } else {
+    DEBUG_PRINTLN("Skipping NTP sync, using RTC time");
+    setTimezone(); // Ensure timezone is set when skipping NTP
+  }
 
-    // Check if time is valid, if not sync with NTP
-    if (!isTimeValid()) {
-        DEBUG_PRINTLN("Time is not valid, syncing with NTP...");
-        if (!syncTimeFromNTP()) {
-            DEBUG_PRINTLN("Failed to sync time from NTP");
-            // Continue anyway, we'll try again next cycle
-        }
-    }
+  struct tm now;
+  if (getLocalTime(&now)) {
+    DEBUG_PRINTF("Current time: %04d-%02d-%02d %02d:%02d:%02d\n",
+                 now.tm_year + 1900, now.tm_mon + 1, now.tm_mday,
+                 now.tm_hour, now.tm_min, now.tm_sec);
+  }
 
-    // Display current time
-    DEBUG_PRINTF("Current time: %s\n", rtc.getTime("%Y-%m-%d %H:%M:%S").c_str());
+  if (isNighttime()) {
+    goToSleep(NIGHT_SLEEP_S);
+  }
 
-    // Check if it's nighttime (midnight to 6am)
-    if (isNighttime()) {
-        DEBUG_PRINTLN("It's nighttime (00:00-06:00), sleeping for 6 hours");
-        goToSleep(NIGHTTIME_SLEEP_DURATION);
-        return;
-    }
+  if (!displayImage()) {
+    goToSleep(ERROR_SLEEP_S);
+  }
 
-    // Try to display image
-    bool imageSuccess = displayImage();
-    if (!imageSuccess) {
-        DEBUG_PRINTLN("Image download failed - keeping stale image, sleeping for shorter duration");
-        goToSleep(DEEP_SLEEP_ON_ERROR);
-        return; // Never reached, but good practice
-    }
-
-    // Send MQTT telemetry only if image was successful
-    sendMqttMsg();
-
-    // Calculate sleep duration based on time
-    unsigned long sleepDuration = calculateSleepDuration();
-    goToSleep(sleepDuration);
+  sendMqttMsg();
+  goToSleep(calculateSleepSeconds());
 }
 
-void loop() {
-    // Empty loop as we're using deep sleep
+void loop() {}
+
+static bool connectWifi() {
+  DEBUG_PRINT("Connecting to WiFi...");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.setTxPower(WIFI_POWER_8_5dBm); // Set power before connection for battery savings
+  WiFi.disconnect(true, true);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  const uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - start) < WIFI_TIMEOUT_MS) {
+    delay(100);
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    DEBUG_PRINTLN("\nWiFi connect failed");
+    return false;
+  }
+
+  DEBUG_PRINTF("\nConnected, IP: %s\n", WiFi.localIP().toString().c_str());
+  return true;
 }
 
-bool connectWifi() {
-    DEBUG_PRINT("Connecting to WiFi...");
-
-    // Use native WiFi for better power control
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    
-    // Wait for connection with timeout
-    unsigned long startAttemptTime = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < WIFI_TIMEOUT_MS) {
-        delay(100);
-    }
-    
-    if (WiFi.status() != WL_CONNECTED) {
-        DEBUG_PRINTLN("\nFailed to connect to WiFi");
-        return false;
-    }
-
-    // Reduce WiFi TX power for battery savings (device is close to AP)
-    WiFi.setTxPower(WIFI_POWER_8_5dBm);  // Options: 19.5, 19, 18.5, 17, 15, 13, 11, 8.5, 7, 5, 2, -1 dBm
-
-    DEBUG_PRINTLN("\nConnected to WiFi");
-    DEBUG_PRINT("IP address: ");
-    DEBUG_PRINTLN(WiFi.localIP());
-    return true;
+static void setTimezone() {
+    setenv("TZ", TIMEZONE, 1);
+    tzset();
 }
 
-bool syncTimeFromNTP() {
-    DEBUG_PRINTLN("Syncing time from NTP server...");
-    
-    // Configure time with NTP (use UTC, we'll convert with Timezone library)
-    configTime(0, 0, NTP_SERVER);  // 0 offset = UTC
-    
-    // Wait for time to be set
+static bool syncTimeFromNtp() {
+    DEBUG_PRINTLN("Syncing time from NTP...");
+
+    // Configure timezone and sync time from NTP in one call
+    configTzTime(TIMEZONE, NTP_SERVER);
+
     struct tm timeinfo;
-    int attempts = 0;
-    while (!getLocalTime(&timeinfo) && attempts < 10) {
-        DEBUG_PRINT(".");
-        delay(500);
-        attempts++;
-    }
-    
-    if (attempts >= 10) {
-        DEBUG_PRINTLN("\nFailed to obtain time from NTP");
-        return false;
-    }
-    
-    DEBUG_PRINTLN("\nTime synchronized successfully");
-
-    // Get UTC time as epoch
-    time_t utcTime = mktime(&timeinfo);
-
-    // Convert to local time using Timezone library (handles DST automatically)
-    time_t localTime = usEastern.toLocal(utcTime);
-    struct tm* localTimeInfo = localtime(&localTime);
-
-    // Set ESP32Time RTC with the local time
-    rtc.setTime(localTimeInfo->tm_sec, localTimeInfo->tm_min, localTimeInfo->tm_hour,
-                localTimeInfo->tm_mday, localTimeInfo->tm_mon + 1, localTimeInfo->tm_year + 1900);
-
-    return true;
-}
-
-bool isTimeValid() {
-    // Check if the current time is after Jan 1, 2026
-    unsigned long currentEpoch = rtc.getEpoch();
-    bool valid = currentEpoch >= TIME_VALIDITY_EPOCH;
-    
-    DEBUG_PRINTF("Current epoch: %lu, Valid threshold: %lu, Is valid: %s\n",
-                  currentEpoch, TIME_VALIDITY_EPOCH, valid ? "YES" : "NO");
-    
-    return valid;
-}
-
-bool isNighttime() {
-    int currentHour = rtc.getHour(true);  // true = 24-hour format
-    
-    DEBUG_PRINTF("Current hour: %d, Nighttime hours: %d-%d\n",
-                  currentHour, NIGHTTIME_START_HOUR, NIGHTTIME_END_HOUR);
-    
-    // Check if current hour is between midnight (0) and 6am
-    return (currentHour >= NIGHTTIME_START_HOUR && currentHour < NIGHTTIME_END_HOUR);
-}
-
-unsigned long calculateSleepDuration() {
-    int currentHour = rtc.getHour(true);
-    int currentMinute = rtc.getMinute();
-    
-    // Calculate minutes until midnight
-    int minutesUntilMidnight = (24 - currentHour - 1) * 60 + (60 - currentMinute);
-    
-    // If we're close to midnight (within normal sleep duration), sleep until just past midnight
-    if (minutesUntilMidnight <= (DEEP_SLEEP_DURATION / 60)) {
-        unsigned long sleepSeconds = (minutesUntilMidnight * 60) + 300; // Add 5 minutes buffer
-        DEBUG_PRINTF("Close to midnight, sleeping for %lu seconds to enter nighttime mode\n", sleepSeconds);
-        return sleepSeconds;
-    }
-    
-    // Otherwise, normal sleep duration
-    DEBUG_PRINTF("Using normal sleep duration: %lu seconds\n", DEEP_SLEEP_DURATION);
-    return DEEP_SLEEP_DURATION;
-}
-
-bool displayImage() {
-    DEBUG_PRINTLN("Downloading and displaying image...");
-
-    // Disable WiFi sleep for stable connection during download
-    WiFi.setSleep(false);
-
-    bool success = false;
-
-    // Try multiple times to download the image
-    for (int attempt = 1; attempt <= IMAGE_RETRY_ATTEMPTS; attempt++) {
-        DEBUG_PRINTF("Image download attempt %d/%d...\n", attempt, IMAGE_RETRY_ATTEMPTS);
-
-        // Clear display buffer
-        display.clearDisplay();
-
-        // drawImage(url, x, y, dither, invert)
-        success = display.drawImage(IMAGE_URL, 0, 0, false, false);
-
-        if (success) {
-            display.display();
-            WiFi.setSleep(true);
-            DEBUG_PRINTLN("Image displayed successfully");
+    for (int i = 0; i < 20; i++) {
+        if (getLocalTime(&timeinfo, 500)) {
+            DEBUG_PRINTLN("Time synchronized");
             return true;
         }
-
-        DEBUG_PRINTF("Attempt %d failed\n", attempt);
-
-        // Wait before retry (except on last attempt) - reduced from 2s to 500ms for power savings
-        if (attempt < IMAGE_RETRY_ATTEMPTS) {
-            delay(500);
-        }
     }
 
-    // All attempts failed
-    WiFi.setSleep(true);
-    DEBUG_PRINTLN("Failed to download image after all attempts");
+    DEBUG_PRINTLN("Failed to obtain time from NTP");
     return false;
 }
 
-void sendMqttMsg() {
-    mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+static bool shouldSyncNtp() {
+  struct tm timeinfo;
 
-    // Single connection attempt - fail fast to save power
-    DEBUG_PRINT("Attempting MQTT connection...");
-    if (!mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD)) {
-        DEBUG_PRINTF("failed, rc=%d\n", mqttClient.state());
-        DEBUG_PRINTLN("Skipping MQTT, will retry in 20 minutes");
-        return;
-    }
+  // First boot or time invalid - must sync
+  if (lastNtpSync == 0 || !getLocalTime(&timeinfo, 100)) {
+    return true;
+  }
 
-    DEBUG_PRINTLN("connected");
+  // Check if time is unreasonably old (before 2026)
+  if ((timeinfo.tm_year + 1900) < 2026) {
+    return true;
+  }
 
-    // Read sensors and publish
-    int temperature = display.readTemperature();
-    float voltage = display.readBattery();
+  time_t now = time(nullptr);
 
-    char message[60];
-    snprintf(message, sizeof(message), "{\"temperature\":%d,\"voltage\":%.2f}", temperature, voltage);
+  // Sync if it's been more than 24 hours since last sync
+  if ((now - lastNtpSync) >= NTP_SYNC_INTERVAL_S) {
+    return true;
+  }
 
-    if (mqttClient.publish(MQTT_TOPIC, message)) {
-        DEBUG_PRINTLN("MQTT message sent successfully");
-    } else {
-        DEBUG_PRINTLN("Failed to send MQTT message");
-    }
-
-    mqttClient.disconnect();
+  return false;
 }
 
-void goToSleep(unsigned long sleepDuration) {
-    // Clean up WiFi
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
+static bool isNighttime() {
+  struct tm now;
+  if (!getLocalTime(&now, 100)) {
+    return false;
+  }
+  return now.tm_hour >= NIGHT_START_HOUR && now.tm_hour < NIGHT_END_HOUR;
+}
 
-    // Isolate GPIO for deep sleep
-    rtc_gpio_isolate(GPIO_NUM_12);
+static uint32_t calculateSleepSeconds() {
+  struct tm now;
+  if (!getLocalTime(&now, 100)) {
+    return NORMAL_SLEEP_S;
+  }
 
-    // Configure wakeup timer
-    esp_sleep_enable_timer_wakeup(sleepDuration * 1000000UL);
+  int currentSeconds = now.tm_hour * 3600 + now.tm_min * 60 + now.tm_sec;
+  int midnightSeconds = 24 * 3600;
+  int secondsUntilMidnight = midnightSeconds - currentSeconds;
 
-    DEBUG_PRINTF("Going to sleep for %lu seconds (%lu minutes)...\n", 
-                  sleepDuration, sleepDuration / 60);
-    
-    #ifdef INKPLATE_DEBUG
-    Serial.flush();
-    #endif
+  if (secondsUntilMidnight <= (int)NORMAL_SLEEP_S) {
+    return secondsUntilMidnight + 300;
+  }
 
-    // Enter deep sleep
-    esp_deep_sleep_start();
+  return NORMAL_SLEEP_S;
+}
+
+static bool displayImage() {
+  DEBUG_PRINTLN("Downloading image...");
+  WiFi.setSleep(false);
+
+  for (int attempt = 1; attempt <= (int)IMAGE_RETRY_ATTEMPTS; ++attempt) {
+    display.clearDisplay();
+    if (display.drawImage(IMAGE_URL, 0, 0, false, false)) {
+      display.display();
+      WiFi.setSleep(true);
+      DEBUG_PRINTLN("Image displayed");
+      return true;
+    }
+
+    DEBUG_PRINTF("Image attempt %d failed\n", attempt);
+    if (attempt < (int)IMAGE_RETRY_ATTEMPTS) {
+      delay(500);
+    }
+  }
+
+  WiFi.setSleep(true);
+  return false;
+}
+
+static void sendMqttMsg() {
+  WiFiClient mqttWifiClient;
+  PubSubClient mqttClient(mqttWifiClient);
+
+  mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+
+  if (!mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD)) {
+    DEBUG_PRINTF("MQTT connect failed, rc=%d\n", mqttClient.state());
+    return;
+  }
+
+  int temperature = display.readTemperature();
+  float voltage = display.readBattery();
+
+  char payload[64];
+  snprintf(payload, sizeof(payload), "{\"temperature\":%d,\"voltage\":%.2f}",
+           temperature, voltage);
+
+  mqttClient.publish(MQTT_TOPIC, payload);
+  mqttClient.disconnect();
+}
+
+static void goToSleep(uint32_t sleepSeconds) {
+  WiFi.disconnect(true, true);
+  WiFi.mode(WIFI_OFF);
+
+  rtc_gpio_isolate(GPIO_NUM_12);
+
+  esp_sleep_enable_timer_wakeup((uint64_t)sleepSeconds * 1000000ULL);
+
+#ifdef INKPLATE_DEBUG
+  Serial.flush();
+#endif
+
+  esp_deep_sleep_start();
 }
 

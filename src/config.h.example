@@ -20,4 +20,13 @@ const char* IMAGE_URL = "https://example.com/your-image.jpg";
 const char* NTP_SERVER = "pool.ntp.org";
 // Timezone is configured in main.cpp (defaults to US Eastern Time with automatic DST)
 
+// Timezone Configuration
+// Format: STD offset DST [,start[/time],end[/time]]
+// EST5EDT = Eastern Time (UTC-5 standard, UTC-4 daylight)
+// PST8PDT = Pacific Time (UTC-8 standard, UTC-7 daylight)
+// MST7MDT = Mountain Time (UTC-7 standard, UTC-6 daylight)
+// CST6CDT = Central Time (UTC-6 standard, UTC-5 daylight)
+// For more formats: https://www.gnu.org/software/libc/manual/html_node/TZ-Variable.html
+const char* TIMEZONE = "EST5EDT,M3.2.0/2,M11.1.0/2";
+
 #endif // CONFIG_H
