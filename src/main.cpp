@@ -6,20 +6,21 @@
 
 #include <Arduino.h>
 #include <Inkplate.h>
+#include <PubSubClient.h>
 #include <WiFi.h>
 #include <driver/rtc_io.h>
-#include <PubSubClient.h>
 #include <time.h>
+
 #include "config.h"
 
 #ifdef INKPLATE_DEBUG
-  #define DEBUG_PRINT(x) Serial.print(x)
-  #define DEBUG_PRINTLN(x) Serial.println(x)
-  #define DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)
+#define DEBUG_PRINT(x) Serial.print(x)
+#define DEBUG_PRINTLN(x) Serial.println(x)
+#define DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)
 #else
-  #define DEBUG_PRINT(x)
-  #define DEBUG_PRINTLN(x)
-  #define DEBUG_PRINTF(...)
+#define DEBUG_PRINT(x)
+#define DEBUG_PRINTLN(x)
+#define DEBUG_PRINTF(...)
 #endif
 
 static constexpr uint32_t WIFI_TIMEOUT_MS = 20000;
@@ -29,7 +30,7 @@ static constexpr uint32_t ERROR_SLEEP_S = 300;
 static constexpr uint32_t NIGHT_SLEEP_S = 21600;
 static constexpr int NIGHT_START_HOUR = 0;
 static constexpr int NIGHT_END_HOUR = 6;
-static constexpr uint32_t NTP_SYNC_INTERVAL_S = 86400; // 24 hours
+static constexpr uint32_t NTP_SYNC_INTERVAL_S = 86400;  // 24 hours
 
 // RTC memory to persist last NTP sync time across deep sleep
 RTC_DATA_ATTR time_t lastNtpSync = 0;
@@ -65,18 +66,17 @@ void setup() {
       DEBUG_PRINTLN("NTP sync successful");
     } else {
       DEBUG_PRINTLN("NTP sync failed, continuing with RTC time");
-      setTimezone(); // Ensure timezone is set even if NTP fails
+      setTimezone();  // Ensure timezone is set even if NTP fails
     }
-    delay(100); // Brief delay to ensure WiFi stack is stable after NTP
+    delay(100);  // Brief delay to ensure WiFi stack is stable after NTP
   } else {
     DEBUG_PRINTLN("Skipping NTP sync, using RTC time");
-    setTimezone(); // Ensure timezone is set when skipping NTP
+    setTimezone();  // Ensure timezone is set when skipping NTP
   }
 
   struct tm now;
   if (getLocalTime(&now)) {
-    DEBUG_PRINTF("Current time: %04d-%02d-%02d %02d:%02d:%02d\n",
-                 now.tm_year + 1900, now.tm_mon + 1, now.tm_mday,
+    DEBUG_PRINTF("Current time: %04d-%02d-%02d %02d:%02d:%02d\n", now.tm_year + 1900, now.tm_mon + 1, now.tm_mday,
                  now.tm_hour, now.tm_min, now.tm_sec);
   }
 
@@ -98,7 +98,7 @@ static bool connectWifi() {
   DEBUG_PRINT("Connecting to WiFi...");
 
   WiFi.mode(WIFI_STA);
-  WiFi.setTxPower(WIFI_POWER_8_5dBm); // Set power before connection for battery savings
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);  // Set power before connection for battery savings
   WiFi.disconnect(true, true);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
@@ -117,26 +117,26 @@ static bool connectWifi() {
 }
 
 static void setTimezone() {
-    setenv("TZ", TIMEZONE, 1);
-    tzset();
+  setenv("TZ", TIMEZONE, 1);
+  tzset();
 }
 
 static bool syncTimeFromNtp() {
-    DEBUG_PRINTLN("Syncing time from NTP...");
+  DEBUG_PRINTLN("Syncing time from NTP...");
 
-    // Configure timezone and sync time from NTP in one call
-    configTzTime(TIMEZONE, NTP_SERVER);
+  // Configure timezone and sync time from NTP in one call
+  configTzTime(TIMEZONE, NTP_SERVER);
 
-    struct tm timeinfo;
-    for (int i = 0; i < 20; i++) {
-        if (getLocalTime(&timeinfo, 500)) {
-            DEBUG_PRINTLN("Time synchronized");
-            return true;
-        }
+  struct tm timeinfo;
+  for (int i = 0; i < 20; i++) {
+    if (getLocalTime(&timeinfo, 500)) {
+      DEBUG_PRINTLN("Time synchronized");
+      return true;
     }
+  }
 
-    DEBUG_PRINTLN("Failed to obtain time from NTP");
-    return false;
+  DEBUG_PRINTLN("Failed to obtain time from NTP");
+  return false;
 }
 
 static bool shouldSyncNtp() {
@@ -225,8 +225,7 @@ static void sendMqttMsg() {
   float voltage = display.readBattery();
 
   char payload[64];
-  snprintf(payload, sizeof(payload), "{\"temperature\":%d,\"voltage\":%.2f}",
-           temperature, voltage);
+  snprintf(payload, sizeof(payload), "{\"temperature\":%d,\"voltage\":%.2f}", temperature, voltage);
 
   mqttClient.publish(MQTT_TOPIC, payload);
   mqttClient.disconnect();
@@ -246,4 +245,3 @@ static void goToSleep(uint32_t sleepSeconds) {
 
   esp_deep_sleep_start();
 }
-
