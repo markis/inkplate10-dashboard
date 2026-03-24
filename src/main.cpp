@@ -5,9 +5,11 @@
 // #define INKPLATE_DEBUG
 
 #include <Arduino.h>
+#include <HTTPClient.h>
 #include <Inkplate.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <driver/rtc_io.h>
 #include <time.h>
 
@@ -32,8 +34,10 @@ static constexpr int NIGHT_START_HOUR = 0;
 static constexpr int NIGHT_END_HOUR = 6;
 static constexpr uint32_t NTP_SYNC_INTERVAL_S = 86400;  // 24 hours
 
-// RTC memory to persist last NTP sync time across deep sleep
+// RTC memory to persist data across deep sleep
 RTC_DATA_ATTR time_t lastNtpSync = 0;
+RTC_DATA_ATTR char lastModified[64] = "";  // Store Last-Modified header
+RTC_DATA_ATTR char etag[64] = "";          // Store ETag header
 
 Inkplate display(INKPLATE_3BIT);
 
@@ -188,26 +192,113 @@ static uint32_t calculateSleepSeconds() {
 }
 
 static bool displayImage() {
-  DEBUG_PRINTLN("Downloading image...");
   WiFi.setSleep(false);
 
-  for (int attempt = 1; attempt <= (int)IMAGE_RETRY_ATTEMPTS; ++attempt) {
-    display.clearDisplay();
-    if (display.drawImage(IMAGE_URL, 0, 0, false, false)) {
-      display.display();
-      WiFi.setSleep(true);
-      DEBUG_PRINTLN("Image displayed");
-      return true;
-    }
+  WiFiClientSecure *client = new WiFiClientSecure;
+  if (!client) {
+    WiFi.setSleep(true);
+    return false;
+  }
 
-    DEBUG_PRINTF("Image attempt %d failed\n", attempt);
-    if (attempt < (int)IMAGE_RETRY_ATTEMPTS) {
-      delay(500);
-    }
+  client->setInsecure();
+  HTTPClient *http = new HTTPClient();
+
+  if (!http->begin(*client, IMAGE_URL)) {
+    delete http;
+    delete client;
+    WiFi.setSleep(true);
+    return false;
+  }
+
+  http->setConnectTimeout(10000);
+  http->setTimeout(10000);
+
+  // Send conditional request headers if we have them
+  if (lastModified[0] != '\0') {
+    http->addHeader("If-Modified-Since", lastModified);
+  }
+  if (etag[0] != '\0') {
+    http->addHeader("If-None-Match", etag);
+  }
+
+  // Tell HTTPClient to collect cache headers
+  const char* headerKeys[] = {"Last-Modified", "ETag"};
+  http->collectHeaders(headerKeys, 2);
+
+  int httpCode = http->GET();
+  DEBUG_PRINTF("HTTP %d\n", httpCode);
+
+  // Image not modified - skip display
+  if (httpCode == HTTP_CODE_NOT_MODIFIED) {
+    DEBUG_PRINTLN("304 - Skipping refresh");
+    http->end();
+    delete http;
+    delete client;
+    WiFi.setSleep(true);
+    return true;
+  }
+
+  // Precondition failed - clear stale cache
+  if (httpCode == 412) {
+    DEBUG_PRINTLN("412 - Clearing stale cache");
+    lastModified[0] = '\0';
+    etag[0] = '\0';
+    http->end();
+    delete http;
+    delete client;
+    WiFi.setSleep(true);
+    return false;
+  }
+
+  // Error - don't clear cache, retry next cycle
+  if (httpCode != HTTP_CODE_OK) {
+    DEBUG_PRINTF("Error %d\n", httpCode);
+    http->end();
+    delete http;
+    delete client;
+    WiFi.setSleep(true);
+    return false;
+  }
+
+  DEBUG_PRINTLN("200 - Streaming image");
+
+  // Cache new headers for next time
+  if (http->hasHeader("Last-Modified")) {
+    String lm = http->header("Last-Modified");
+    strncpy(lastModified, lm.c_str(), sizeof(lastModified) - 1);
+    lastModified[sizeof(lastModified) - 1] = '\0';
+  }
+  if (http->hasHeader("ETag")) {
+    String et = http->header("ETag");
+    strncpy(etag, et.c_str(), sizeof(etag) - 1);
+    etag[sizeof(etag) - 1] = '\0';
+  }
+
+  // Stream image directly to display - no manual buffering!
+  int len = http->getSize();
+  if (len <= 0) {
+    http->end();
+    delete http;
+    delete client;
+    WiFi.setSleep(true);
+    return false;
+  }
+
+  WiFiClient* stream = http->getStreamPtr();
+  display.clearDisplay();
+  bool success = display.drawJpegFromWeb(stream, 0, 0, len, false, false);
+
+  http->end();
+  delete http;
+  delete client;
+
+  if (success) {
+    display.display();
+    DEBUG_PRINTLN("Image displayed");
   }
 
   WiFi.setSleep(true);
-  return false;
+  return success;
 }
 
 static void sendMqttMsg() {
